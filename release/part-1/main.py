@@ -34,18 +34,46 @@ def do_train(args, model, train_dataloader, save_dir="./out"):
     lr_scheduler = get_scheduler(
         name="linear", optimizer=optimizer, num_warmup_steps=0, num_training_steps=num_training_steps
     )
+
+    start_epoch = 0
+    checkpoint_path = os.path.join(save_dir, "training_checkpoint.pt")
+
+    # Resume from checkpoint if requested and checkpoint exists
+    if args.resume and os.path.exists(checkpoint_path):
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        model.load_state_dict(checkpoint['model_state_dict'])
+        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        lr_scheduler.load_state_dict(checkpoint['scheduler_state_dict'])
+        start_epoch = checkpoint['epoch'] + 1
+        print(f"Resumed training from epoch {start_epoch}")
+
     model.train()
-    progress_bar = tqdm(range(num_training_steps))
+    remaining_steps = (num_epochs - start_epoch) * len(train_dataloader)
+    progress_bar = tqdm(range(remaining_steps))
 
     ################################
     ##### YOUR CODE BEGINGS HERE ###
 
-    # Implement the training loop --- make sure to use the optimizer and lr_sceduler (learning rate scheduler)
-    # Remember that pytorch uses gradient accumumlation so you need to use zero_grad (https://pytorch.org/tutorials/recipes/recipes/zeroing_out_gradients.html)
-    # You can use progress_bar.update(1) to see the progress during training
-    # You can refer to the pytorch tutorial covered in class for reference
+    for epoch in range(start_epoch, num_epochs):
+        for batch in train_dataloader:
+            batch = {k: v.to(device) for k, v in batch.items()}
+            outputs = model(**batch)
+            loss = outputs.loss
+            loss.backward()
+            optimizer.step()
+            lr_scheduler.step()
+            optimizer.zero_grad()
+            progress_bar.update(1)
 
-    raise NotImplementedError
+        # Save checkpoint at end of each epoch
+        os.makedirs(save_dir, exist_ok=True)
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'scheduler_state_dict': lr_scheduler.state_dict(),
+        }, checkpoint_path)
+        print(f"Checkpoint saved at epoch {epoch}")
 
     ##### YOUR CODE ENDS HERE ######
 
@@ -89,11 +117,20 @@ def create_augmented_dataloader(args, dataset):
     ################################
     ##### YOUR CODE BEGINGS HERE ###
 
-    # Here, 'dataset' is the original dataset. You should return a dataloader called 'train_dataloader' -- this
-    # dataloader will be for the original training split augmented with 5k random transformed examples from the training set.
-    # You may find it helpful to see how the dataloader was created at other place in this code.
+    # Sample 5000 random examples from the training set and apply the transformation
+    augmented_subset = dataset["train"].shuffle(seed=42).select(range(5000))
+    augmented_subset = augmented_subset.map(custom_transform, load_from_cache_file=False)
 
-    raise NotImplementedError
+    # Concatenate original + augmented training data
+    combined_dataset = datasets.concatenate_datasets([dataset["train"], augmented_subset])
+
+    # Tokenize and prepare for model
+    combined_tokenized = combined_dataset.map(tokenize_function, batched=True, load_from_cache_file=False)
+    combined_tokenized = combined_tokenized.remove_columns(["text"])
+    combined_tokenized = combined_tokenized.rename_column("label", "labels")
+    combined_tokenized.set_format("torch")
+
+    train_dataloader = DataLoader(combined_tokenized, shuffle=True, batch_size=args.batch_size)
 
     ##### YOUR CODE ENDS HERE ######
 
@@ -142,6 +179,8 @@ if __name__ == "__main__":
                         help="use a subset for training to debug your training loop")
     parser.add_argument("--debug_transformation", action="store_true",
                         help="print a few transformed examples for debugging")
+    parser.add_argument("--resume", action="store_true",
+                        help="resume training from the last checkpoint")
     parser.add_argument("--learning_rate", type=float, default=5e-5)
     parser.add_argument("--num_epochs", type=int, default=3)
     parser.add_argument("--batch_size", type=int, default=8)
